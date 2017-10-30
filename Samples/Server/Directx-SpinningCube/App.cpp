@@ -56,6 +56,8 @@ BufferRenderer*		g_bufferRenderer = nullptr;
 ServerConfig		g_serverConfig;
 ServiceConfig		g_serviceConfig;
 WebRTCConfig		g_webrtcConfig;
+bool				g_renderingModeSet = false;
+int64_t				g_lastTimestamp = -1;
 #endif // TESTRUNNER
 
 #ifndef TEST_RUNNER
@@ -117,6 +119,12 @@ bool AppMain(BOOL stopping)
 		{
 			g_cubeRenderer->Render();
 		}
+
+		// Always send the video frame in mono rendering mode.
+		if (g_renderingModeSet && !g_deviceResources->IsStereo())
+		{
+			g_bufferRenderer->Lock();
+		}
 	});
 
 	ID3D11Texture2D* frameBuffer = nullptr;
@@ -163,42 +171,48 @@ bool AppMain(BOOL stopping)
 			strcpy(body, msg.get("body", "").asCString());
 			std::istringstream datastream(body);
 			std::string token;
-
 			if (strcmp(type, "stereo-rendering") == 0)
 			{
 				getline(datastream, token, ',');
 				bool isStereo = stoi(token) == 1;
-				if (isStereo == g_deviceResources->IsStereo())
+				if (isStereo != g_deviceResources->IsStereo())
 				{
-					return;
+					// Releases the current frame buffer.
+					g_bufferRenderer->Release();
+
+					// Resizes the swap chain.
+					g_deviceResources->SetStereo(isStereo);
+
+					// Updates the new frame buffer.
+					if (!g_serverConfig.system_service)
+					{
+						ID3D11Texture2D* frameBuffer = nullptr;
+						HRESULT hr = g_deviceResources->GetSwapChain()->GetBuffer(
+							0,
+							__uuidof(ID3D11Texture2D),
+							reinterpret_cast<void**>(&frameBuffer));
+
+						g_bufferRenderer->Resize(frameBuffer);
+
+						// Makes sure to release the frame buffer reference.
+						SAFE_RELEASE(frameBuffer);
+					}
+					else
+					{
+						SIZE size = g_deviceResources->GetOutputSize();
+						g_bufferRenderer->Resize(size.cx, size.cy);
+					}
+
+					if (isStereo)
+					{
+						// In stereo rendering mode, we need to position the cube
+						// in front of user.
+						Windows::Foundation::Numerics::float3 position = { 0.f, 0.f, 3.f };
+						g_cubeRenderer->SetPosition(position);
+					}
 				}
 
-				// Releases the current frame buffer.
-				g_bufferRenderer->Release();
-
-				// Resizes the swap chain.
-				g_deviceResources->SetStereo(isStereo);
-				
-				// Updates the new frame buffer.
-				if (!g_serverConfig.system_service)
-				{
-					ID3D11Texture2D* frameBuffer = nullptr;
-					HRESULT hr = g_deviceResources->GetSwapChain()->GetBuffer(
-						0,
-						__uuidof(ID3D11Texture2D),
-						reinterpret_cast<void**>(&frameBuffer));
-
-					g_bufferRenderer->Resize(frameBuffer);
-
-					// Makes sure to release the frame buffer reference.
-					SAFE_RELEASE(frameBuffer);
-				}
-				else
-				{
-					SIZE size = g_deviceResources->GetOutputSize();
-					g_bufferRenderer->Resize(size.cx, size.cy);
-				}
-
+				g_renderingModeSet = true;
 			}
 			else if (strcmp(type, "camera-transform-lookat") == 0)
 			{
@@ -233,6 +247,11 @@ bool AppMain(BOOL stopping)
 			}
 			else if (strcmp(type, "camera-transform-stereo") == 0)
 			{
+				if (!g_renderingModeSet || g_bufferRenderer->IsLocked())
+				{
+					return;
+				}
+
 				// Parses the left view projection matrix.
 				DirectX::XMFLOAT4X4 viewProjectionLeft;
 				for (int i = 0; i < 4; i++)
@@ -255,9 +274,21 @@ bool AppMain(BOOL stopping)
 					}
 				}
 
-				// Updates the cube's matrices.
-				g_cubeRenderer->UpdateView(
-					viewProjectionLeft, viewProjectionRight);
+				// Parses the prediction timestamp.
+				getline(datastream, token, ',');
+				int64_t timestamp = stoll(token);
+				if (timestamp != g_lastTimestamp)
+				{
+					g_lastTimestamp = timestamp;
+
+					// Updates the cube's matrices.
+					g_cubeRenderer->UpdateView(
+						viewProjectionLeft, viewProjectionRight);
+
+					g_bufferRenderer->SetPredictionTimestamp(timestamp);
+
+					g_bufferRenderer->Lock();
+				}
 			}
 		}
 	});
@@ -377,7 +408,7 @@ bool AppMain(BOOL stopping)
 				::DispatchMessage(&msg);
 			}
 
-			if (conductor->connection_active() || client.is_connected())
+			if (g_renderingModeSet && (conductor->connection_active() || client.is_connected()))
 			{
 				g_deviceResources->Present();
 			}

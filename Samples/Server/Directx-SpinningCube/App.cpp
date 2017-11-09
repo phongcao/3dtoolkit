@@ -118,6 +118,12 @@ bool AppMain(BOOL stopping)
 		else
 		{
 			g_cubeRenderer->Render();
+
+			// Do not present swapchain in stereo mode since it affects the frame prediction.
+			if (!g_deviceResources->IsStereo())
+			{
+				g_deviceResources->Present();
+			}
 		}
 
 		// Always send the video frame in mono rendering mode.
@@ -406,11 +412,6 @@ bool AppMain(BOOL stopping)
 			{
 				::TranslateMessage(&msg);
 				::DispatchMessage(&msg);
-			}
-
-			if (g_renderingModeSet && (conductor->connection_active() || client.is_connected()))
-			{
-				g_deviceResources->Present();
 			}
 		}
 	}
